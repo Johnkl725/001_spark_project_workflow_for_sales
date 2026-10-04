@@ -4,41 +4,52 @@ An end-to-end data engineering portfolio project demonstrating the **Medallion A
 
 This project simulates a real-world corporate environment where operational data (the "Core") is extracted from various sources (CRMs like Salesforce, ERPs, Oracle DBs) and transformed into a highly optimized analytical model for Business Intelligence (Power BI) and Data Science teams.
 
-## 🏗️ Architecture Overview
+## 🏗️ Spark Cluster Architecture & Execution
 
-The pipeline strictly follows the Medallion Architecture paradigm, processing data progressively to improve structure and quality.
+The project relies on a containerized **Spark Standalone Cluster** managed via Docker/Podman, closely mimicking the behavior of Cloud Data Platforms (such as Azure Databricks Job Clusters):
+
+- **Cluster Manager (Master):** Monitors the available resources across the cluster.
+- **Workers:** Two worker nodes holding the physical memory and CPU cores.
+- **The Driver (Airflow):** Acts as the brain of the operation. Airflow executes the Python scripts, which instantiate the `SparkSession`. The Driver negotiates resources with the Master, allocates **Executors** on the Workers, and uses the **Catalyst Optimizer** to build the physical execution plan (DAG of stages) dynamically applying techniques like Broadcast Joins or Adaptive Query Execution (AQE).
+
+## 📊 Volumetrics & Scale
+The pipeline was battle-tested by processing a massive **TPC-H dataset** containing nearly **18 million historical records**. The pipeline successfully ingests this volume and transforms it into a highly optimized Star Schema consisting of 9 analytical tables, including:
+- `fact_sales`: ~17.9 Million rows
+- `fact_orders`: ~4.5 Million rows
+- `agg_customer_monthly`: ~4 Million rows
+
+## 🥈 Medallion Layers & Processing Logic
+
+The pipeline strictly follows the Medallion Architecture paradigm, processing data progressively to improve structure and quality. All execution logic is fully decoupled from the business rules, which are maintained in `.yml` configurations.
 
 ### 0. The "Core" (Source Data)
-In a real enterprise, the "Core" refers to the transactional databases (OLTP) from different agencies or systems. In this project, the core is simulated using raw Parquet files located in `data/source/tpch/`. If we were to scale this to multiple CRMs or agencies, we would simply have multiple ingestion pipelines feeding into the Bronze layer.
+In a real enterprise, the "Core" refers to the transactional databases (OLTP) from different agencies or systems. In this project, the core is simulated using raw Parquet files located in `data/source/tpch/`. To scale this to multiple CRMs or agencies, we would simply add new paths to the configuration files without changing the Spark codebase.
 
 ### 1. 🥉 Bronze Layer (Raw Ingestion)
-- **Goal:** Ingest raw data exactly as it arrives from the core systems, appending a timestamp and execution ID.
-- **Mechanism:** Insert-only incremental loads. It acts as an immutable historical archive.
+- **Goal:** Ingest raw data exactly as it arrives from the core systems, appending auditing metadata (`_ingestion_timestamp`).
+- **Processing:** The Spark Driver reads the source files and performs an **insert-only** incremental load. It acts as an immutable historical archive. No data is altered or deleted in this stage.
 - **Files:** `jobs/run_bronze.py`, `jobs/bronze_ingestion.py`, `jobs/bronze_config.yml`.
 
 ### 2. 🥈 Silver Layer (Cleansing & Enrichment)
 - **Goal:** Filter, clean, and conform data to a strict corporate schema.
-- **Mechanism:** Performs validations (rejecting nulls, casting types) and handles **Upserts** (Updates and Inserts) using Delta Lake's native `MERGE` operation. This ensures that changes in the source system (e.g., an order status update) are accurately reflected.
+- **Processing:** The data is transformed by dropping invalid records, casting data types, and filtering out nulls based on the `.yml` rules. To handle slowly changing dimensions or updates from the core, this layer uses Delta Lake's native **Upserts** (`MERGE INTO`). This ensures that changes in the source system (e.g., an order status update) are accurately reflected without duplicating rows.
 - **Files:** `jobs/silver_processor.py`, `jobs/silver_config.yml`.
 
 ### 3. 🥇 Gold Layer (Business Aggregations)
 - **Goal:** Deliver finalized, business-ready data products.
-- **Mechanism:** Transforms the normalized Silver data into a **Star Schema** (Fact and Dimension tables) tailored for downstream BI tools. It also performs high-level monthly aggregations. Uses Delta `MERGE` to efficiently update analytical tables on daily increments.
+- **Processing:** Transforms the normalized Silver data into a **Star Schema** (Fact and Dimension tables) tailored for downstream BI tools. It also calculates heavy monthly aggregations for faster reporting. Similar to Silver, it leverages Delta `MERGE` to efficiently update analytical tables on daily increments without recalculating the 18M rows.
 - **Files:** `jobs/gold_processor.py`, `jobs/gold_config.yml`.
 
 ## ⚙️ Orchestration with Apache Airflow
 
 The entire workflow is orchestrated using **Apache Airflow** (located in `dags/tpch_pipeline.py`). 
 
-Airflow simulates a modern Cloud Data Platform behavior (like **Azure Databricks Job Clusters**):
 1. The DAG triggers on a daily schedule.
-2. It executes the Bronze, Silver, and Gold jobs sequentially as Spark tasks.
+2. It executes the Bronze, Silver, and Gold jobs sequentially as ephemeral Spark tasks.
 3. If a task fails, the pipeline halts, preventing downstream data corruption.
-4. Because the codebase uses Delta Lake `MERGE`, running the DAG daily takes only seconds/minutes, as it only processes the specific increment (deltas) of that day rather than recalculating the entire historical dataset.
+4. Because the codebase uses Delta Lake `MERGE`, running the DAG daily takes only seconds/minutes, as it processes strictly the specific increment (deltas) of that day.
 
 ## 📂 Repository Structure
-
-The project is structured to keep execution code, configurations, and exploratory environments decoupled:
 
 ```text
 ├── dags/
@@ -55,7 +66,7 @@ The project is structured to keep execution code, configurations, and explorator
 │   ├── silver_config.yml        # Silver configurations & schema
 │   └── gold_config.yml          # Gold schema, primary keys & aggregations
 ├── notebooks/                   # Jupyter notebooks for ad-hoc exploration
-└── docker-compose.yml           # Containerized Spark & Airflow infrastructure
+└── podman-compose.yml           # Containerized Spark & Airflow infrastructure
 ```
 
 ## 🚀 Key Technologies
