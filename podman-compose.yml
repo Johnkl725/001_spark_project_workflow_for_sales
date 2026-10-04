@@ -1,0 +1,94 @@
+name: pyspark-playground
+
+x-spark: &spark
+  user: "0:0"
+  image: docker.io/apache/spark:3.5.6-scala2.12-java17-python3-ubuntu
+  restart: unless-stopped
+  networks: [spark-net]
+  environment:
+    PYSPARK_PYTHON: python3
+    SPARK_LOCAL_DIRS: /tmp/spark
+  volumes:
+    - spark-data:/opt/spark/data
+    - spark-ivy:/opt/spark/ivy
+    - ./exports:/opt/spark/exports
+
+services:
+  spark-master:
+    <<: *spark
+    hostname: spark-master
+    ports:
+      - "127.0.0.1:8080:8080"
+    entrypoint: [/opt/spark/bin/spark-class]
+    command: [org.apache.spark.deploy.master.Master, --host, spark-master, --port, "7077", --webui-port, "8080"]
+
+  spark-worker-1:
+    <<: *spark
+    hostname: spark-worker-1
+    depends_on:
+      - spark-master
+    ports:
+      - "127.0.0.1:8081:8081"
+    entrypoint: [/opt/spark/bin/spark-class]
+    command: [org.apache.spark.deploy.worker.Worker, --host, spark-worker-1, --port, "7078", --webui-port, "8081", --cores, "1", --memory, "2g", spark://spark-master:7077]
+
+  spark-worker-2:
+    <<: *spark
+    hostname: spark-worker-2
+    depends_on:
+      - spark-master
+    ports:
+      - "127.0.0.1:8082:8081"
+    entrypoint: [/opt/spark/bin/spark-class]
+    command: [org.apache.spark.deploy.worker.Worker, --host, spark-worker-2, --port, "7078", --webui-port, "8081", --cores, "1", --memory, "2g", spark://spark-master:7077]
+
+  jupyterlab:
+    <<: *spark
+    hostname: jupyterlab
+    user: "0:0" # Ejecutar como root para instalar dependencias y acceder a volúmenes
+    depends_on:
+      - spark-master
+    ports:
+      - "127.0.0.1:8888:8888" # Puerto para JupyterLab
+      - "127.0.0.1:4040:4040" # Puerto para la UI del Driver de Spark (cuando ejecutes celdas)
+      - "127.0.0.1:10000:10000" # Puerto para Spark Thrift Server (Power BI)
+    volumes:
+      - ./notebooks:/workspace/notebooks
+      - ./jobs:/workspace/jobs
+      - spark-data:/opt/spark/data
+      - spark-ivy:/opt/spark/ivy
+      - ./exports:/opt/spark/exports
+    working_dir: /workspace
+    command: >
+      bash -c "pip install pyspark==3.5.6 pyyaml jupyterlab pandas requests matplotlib &&
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''"
+
+  airflow:
+    image: localhost/gastos-etl-airflow:local
+    hostname: airflow
+    user: "0:0"
+    restart: unless-stopped
+    networks: [spark-net]
+    ports:
+      - "127.0.0.1:8085:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./jobs:/workspace/jobs
+      - ./exports:/opt/spark/exports
+      - spark-data:/opt/spark/data
+      - spark-ivy:/opt/spark/ivy
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    command: standalone
+
+networks:
+  spark-net:
+    driver: bridge
+
+volumes:
+  spark-data:
+    name: pyspark-data
+  spark-ivy:
+    name: pyspark-ivy
+
+

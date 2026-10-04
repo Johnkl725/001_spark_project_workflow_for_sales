@@ -1,0 +1,112 @@
+# Spark 3.5.x / Scala 2.12. All data paths must be accessible to workers.
+spark:
+  app_name: TPCH_Bronze_to_Silver
+  master: spark://spark-master:7077
+  configs:
+    spark.executor.memory: 1g
+    spark.cores.max: '2'
+    spark.sql.shuffle.partitions: '8'
+    spark.jars.packages: io.delta:delta-spark_2.12:3.3.2
+    spark.jars.ivy: /opt/spark/ivy
+    spark.sql.extensions: io.delta.sql.DeltaSparkSessionExtension
+    spark.sql.catalog.spark_catalog: org.apache.spark.sql.delta.catalog.DeltaCatalog
+    spark.sql.ansi.enabled: 'true'
+    spark.sql.decimalOperations.allowPrecisionLoss: 'false'
+    spark.sql.session.timeZone: America/Lima
+
+ingestion:
+  # Insert-only: audit timestamps are NOT source change timestamps / CDC.
+  mode: incremental
+  on_existing_change: fail
+  source_system: ERP_LEGACY_TPCH
+  source_paths:
+    orders: /opt/spark/data/source/tpch/orders.parquet
+    lineitem: /opt/spark/data/source/tpch/lineitem.parquet
+    customer: /opt/spark/data/source/tpch/customer.parquet
+  partition_by:
+    orders: [o_orderstatus]
+    lineitem: []
+    customer: []
+
+sources:
+  orders:
+    path: /opt/spark/data/bronze/orders
+    format: parquet
+    primary_key: [o_orderkey]
+    columns:
+      o_orderkey: long
+      o_custkey: long
+      o_orderdate: date
+      o_orderstatus: string
+      o_totalprice: decimal(15,2)
+  lineitem:
+    path: /opt/spark/data/bronze/lineitem
+    format: parquet
+    primary_key: [l_orderkey, l_linenumber]
+    columns:
+      l_orderkey: long
+      l_linenumber: integer
+      l_partkey: long
+      l_quantity: integer
+      l_extendedprice: decimal(15,2)
+      l_discount: decimal(15,2)
+      l_tax: decimal(15,2)
+  customer:
+    path: /opt/spark/data/bronze/customer
+    format: parquet
+    primary_key: [c_custkey]
+    columns:
+      c_custkey: long
+      c_name: string
+      c_mktsegment: string
+
+joins:
+  - {left: l_orderkey, right: o_orderkey}
+  - {left: o_custkey, right: c_custkey}
+
+business_rules:
+  revenue:
+    price: l_extendedprice
+    discount: l_discount
+    tax: l_tax
+    output: net_revenue
+    # Small exact decimal constant keeps intermediate precision below 38 digits.
+    constant_type: decimal(1,0)
+  order_status:
+    column: o_orderstatus
+    mapping: {O: Open, F: Finished, P: Pending}
+
+output:
+  # Separate from the legacy Parquet destination; never overwrite it as Delta.
+  path: /opt/spark/data/silver/enriched_sales_delta
+  format: delta
+  # Complete snapshot, transactionally replaced on rerun (no duplicate appends).
+  mode: merge
+  primary_key: [order_id, line_number]
+  partitioning:
+    date_column: o_orderdate
+    year_column: order_year
+    month_column: order_month
+  columns:
+    order_id: {source: o_orderkey, type: long}
+    line_number: {source: l_linenumber, type: integer}
+    order_date: {source: o_orderdate, type: date}
+    order_status: {source: o_orderstatus, type: string}
+    order_total: {source: o_totalprice, type: 'decimal(15,2)'}
+    customer_id: {source: c_custkey, type: long}
+    customer_name: {source: c_name, type: string}
+    market_segment: {source: c_mktsegment, type: string}
+    product_id: {source: l_partkey, type: long}
+    quantity: {source: l_quantity, type: integer}
+    base_price: {source: l_extendedprice, type: 'decimal(15,2)'}
+    discount_rate: {source: l_discount, type: 'decimal(15,2)'}
+    tax_rate: {source: l_tax, type: 'decimal(15,2)'}
+    net_revenue: {source: net_revenue, type: 'decimal(15,2)'}
+    order_year: {source: order_year, type: integer}
+    order_month: {source: order_month, type: integer}
+
+quality:
+  required_columns: [order_id, line_number, order_date, order_status, customer_id,
+                     customer_name, market_segment, product_id, quantity,
+                     base_price, discount_rate, tax_rate, order_total,
+                     net_revenue, order_year, order_month]

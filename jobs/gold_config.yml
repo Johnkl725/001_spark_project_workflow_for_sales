@@ -1,0 +1,195 @@
+# Gold: business data products built exclusively from a pinned Silver version.
+spark:
+  app_name: TPCH_Silver_to_Gold
+  master: spark://spark-master:7077
+  configs:
+    spark.executor.memory: 1g
+    spark.cores.max: '2'
+    spark.sql.shuffle.partitions: '8'
+    spark.jars.packages: io.delta:delta-spark_2.12:3.3.2
+    spark.jars.ivy: /opt/spark/ivy
+    spark.sql.extensions: io.delta.sql.DeltaSparkSessionExtension
+    spark.sql.catalog.spark_catalog: org.apache.spark.sql.delta.catalog.DeltaCatalog
+    spark.sql.ansi.enabled: 'true'
+    spark.sql.decimalOperations.allowPrecisionLoss: 'false'
+    spark.sql.session.timeZone: America/Lima
+
+source:
+  path: /opt/spark/data/silver/enriched_sales_delta
+  format: delta
+  # Must match Silver exactly; Gold does not silently repair upstream schemas.
+  columns:
+    order_id: long
+    line_number: integer
+    order_date: date
+    order_status: string
+    order_total: decimal(15,2)
+    customer_id: long
+    customer_name: string
+    market_segment: string
+    product_id: long
+    quantity: integer
+    base_price: decimal(15,2)
+    discount_rate: decimal(15,2)
+    tax_rate: decimal(15,2)
+    net_revenue: decimal(15,2)
+    order_year: integer
+    order_month: integer
+
+business_rules:
+  constant_type: decimal(1,0)
+  money_type: decimal(15,2)
+
+quality:
+  required_columns: [order_id, line_number, order_date, order_status, order_total,
+                     customer_id, customer_name, market_segment, product_id,
+                     quantity, base_price, discount_rate, tax_rate, net_revenue,
+                     order_year, order_month]
+
+output:
+  root: /opt/spark/data/gold
+  mode: merge
+
+# Types of aggregate amounts allow sums greater than individual line amounts.
+tables:
+  fact_sales:
+    grain: one row per order_id and line_number
+    primary_key: [order_id, line_number]
+    partition_by: [order_year, order_month]
+    columns:
+      order_id: long
+      line_number: integer
+      date_key: integer
+      customer_id: long
+      product_id: long
+      order_status: string
+      quantity: integer
+      base_price: decimal(15,2)
+      discount_rate: decimal(15,2)
+      tax_rate: decimal(15,2)
+      discount_amount: decimal(15,2)
+      revenue_before_tax: decimal(15,2)
+      tax_amount: decimal(15,2)
+      net_revenue: decimal(15,2)
+      order_year: integer
+      order_month: integer
+  fact_orders:
+    grain: one row per order_id
+    primary_key: [order_id]
+    partition_by: [order_year, order_month]
+    columns:
+      order_id: long
+      date_key: integer
+      customer_id: long
+      order_status: string
+      order_total: decimal(15,2)
+      line_count: long
+      quantity: long
+      base_price: decimal(25,2)
+      discount_amount: decimal(25,2)
+      revenue_before_tax: decimal(25,2)
+      tax_amount: decimal(25,2)
+      net_revenue: decimal(25,2)
+      order_year: integer
+      order_month: integer
+  dim_date:
+    grain: one row per calendar date
+    primary_key: [date_key]
+    partition_by: []
+    columns:
+      date_key: integer
+      date: date
+      year: integer
+      quarter: integer
+      month: integer
+      month_name: string
+      year_month: string
+      day_of_month: integer
+      day_of_week: integer
+  dim_customer:
+    grain: one row per observed customer_id (snapshot attributes)
+    primary_key: [customer_id]
+    partition_by: []
+    columns:
+      customer_id: long
+      customer_name: string
+      market_segment: string
+  dim_product:
+    grain: one row per observed product_id (identifier only)
+    primary_key: [product_id]
+    partition_by: []
+    columns:
+      product_id: long
+  dim_order_status:
+    grain: one row per observed descriptive order_status
+    primary_key: [order_status]
+    partition_by: []
+    columns:
+      order_status: string
+  dim_market_segment:
+    grain: one row per observed market_segment
+    primary_key: [market_segment]
+    partition_by: []
+    columns:
+      market_segment: string
+  agg_sales_monthly:
+    grain: one row per month, market_segment and order_status
+    primary_key: [date_key, market_segment, order_status]
+    partition_by: [order_year, order_month]
+    columns:
+      date_key: integer
+      month_start_date: date
+      market_segment: string
+      order_status: string
+      order_count: long
+      customer_count: long
+      line_count: long
+      quantity: long
+      base_price: decimal(25,2)
+      discount_amount: decimal(25,2)
+      revenue_before_tax: decimal(25,2)
+      tax_amount: decimal(25,2)
+      net_revenue: decimal(25,2)
+      order_year: integer
+      order_month: integer
+  agg_customer_monthly:
+    grain: one row per month and customer_id
+    primary_key: [date_key, customer_id]
+    partition_by: [order_year, order_month]
+    columns:
+      date_key: integer
+      month_start_date: date
+      customer_id: long
+      order_count: long
+      line_count: long
+      quantity: long
+      base_price: decimal(25,2)
+      discount_amount: decimal(25,2)
+      revenue_before_tax: decimal(25,2)
+      tax_amount: decimal(25,2)
+      net_revenue: decimal(25,2)
+      order_year: integer
+      order_month: integer
+
+export:
+  enabled: true
+  # Bind-mounted to ./exports on the host by podman-compose.
+  root: /opt/spark/exports/gold
+  # Compact Power BI model. Add fact_sales/fact_orders/dim_product for line detail.
+  tables: [dim_date, dim_customer, dim_order_status, dim_market_segment,
+           agg_sales_monthly, agg_customer_monthly]
+  # Max absolute value safe in Power BI Fixed Decimal, rounded down to cents.
+  max_currency_abs: '922337203685477.58'
+  partitions: 2
+  csv_options:
+    header: 'true'
+    encoding: UTF-8
+    delimiter: ','
+    quote: '"'
+    escape: '"'
+    dateFormat: yyyy-MM-dd
+    nullValue: ''
+
+publish:
+  # Atomically replaced after all Delta and CSV tables pass validation.
+  current_manifest: /opt/spark/exports/gold/current.json

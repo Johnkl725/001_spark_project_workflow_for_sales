@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Virtual Environment
+venv/
+ENV/
+.env
+
+# Data and Exports
+data/
+exports/
+*.parquet
+*.csv
+*.json
+*.delta
+
+# Logs and Checkpoints
+_commits/
+_delta_log/
+logs/
+*.log
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
